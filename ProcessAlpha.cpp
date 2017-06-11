@@ -193,3 +193,123 @@ uint64 ProcessAlpha( const uint8* src )
 
     return FixByteOrder( EncodeSelectors( d, terr, tsel, id ) );
 }
+
+uint64 CheckSolidAlpha( const uint8* src )
+{
+#if __ARM_NEON__
+    uint8x16_t d = vld1q_u8(src);
+    uint8x16_t c = vdupq_n_u8(src[0]);
+    uint8x16_t e = vceqq_u8(d, c);
+    int64x2_t m = vreinterpretq_s64_u8(e);
+
+    if (m[0] != -1 || m[1] != -1)
+    {
+        return ~(uint64)0;
+    }
+#else
+    const uint8* ptr = src + 1;
+    for( int i=1; i<16; i++ )
+    {
+        if( memcmp( src, ptr, 1 ) != 0 )
+        {
+            return ~(uint64)0;
+        }
+        ptr += 1;
+    }
+#endif
+    return src[0];
+}
+
+uint64 ProcessAlpha_ETC2( const uint8* src )
+{
+    uint64 d = CheckSolidAlpha( src );
+    if( d != ~(uint64)0 ) return d;
+
+    uint8 min = src[0], max = src[0];
+    uint16 sum = src[0];
+    for( int i = 1; i < 16; ++i )
+    {
+        uint8 v = src[i];
+        if( min > v )
+            min = v;
+        if( max < v )
+            max = v;
+        sum += v;
+    }
+    uint8 avg = sum / 16;
+    uint8 diff = NiMax(max - avg, avg - min);
+#if __ARM_NEON__
+    int16x8_t simdAvg = vdupq_n_s16(avg);
+#endif
+
+    int32 mod[16] =
+    {
+        (diff + 13) / 14, (diff + 11) / 12, (diff + 11) / 12, (diff + 11) / 12,
+        (diff + 10) / 11, (diff + 9) / 10,  (diff + 9) / 10,  (diff + 9) / 10,
+        (diff + 8) / 9,   (diff + 8) / 9,   (diff + 8) / 9,   (diff + 8) / 9,
+        (diff + 8) / 9,   (diff + 8) / 9,   (diff + 7) / 8,   (diff + 7) / 8
+    };
+    uint8 indices[16][16];
+    uint16 bestTable = 0;
+
+    uint16 minTotalError = USHRT_MAX;
+    for( int i = 0; i < 16; ++i )
+    {
+        uint16 totalError = 0;
+#if __ARM_NEON__
+        int16x8_t simdMod = vdupq_n_s16(mod[i]);
+#endif
+        for( int j = 0; j < 16; ++j )
+        {
+            uint16 error = USHRT_MAX;
+#if __ARM_NEON__
+            int16x8_t simdTable = vld1q_s16(g_tableAlpha[i]);
+            int16x8_t simdValue = vmlaq_s16(simdAvg, simdMod, simdTable);
+            uint8x8_t simdZip = vqmovun_s16(simdValue);
+            uint8x8_t simdSrc = vdup_n_u8(src[j]);
+            uint8x8_t simdDiff = vabd_u8(simdZip, simdSrc);
+            for( int k = 0; k < 8; ++k )
+            {
+                uint16 d = simdDiff[k];
+                if (error > d)
+                {
+                    error = d;
+                    indices[i][j] = k;
+                }
+            }
+#else
+            for( int k = 0; k < 8; ++k )
+            {
+                int16 v = NiClamp(mod[i] * g_tableAlpha[i][k] + avg, 0, 255);
+                uint16 d = NiAbs(v - src[j]);
+                if (error > d)
+                {
+                    error = d;
+                    indices[i][j] = k;
+                }
+            }
+#endif
+            totalError += error;
+        }
+        if (minTotalError > totalError)
+        {
+            minTotalError = totalError;
+            bestTable = i;
+        }
+    }
+
+    d = 0;
+    for( int i = 0; i < 4; ++i )
+    {
+        d |= uint64(indices[bestTable][i * 4 + 0]) << (45 - i * 3);
+        d |= uint64(indices[bestTable][i * 4 + 1]) << (33 - i * 3);
+        d |= uint64(indices[bestTable][i * 4 + 2]) << (21 - i * 3);
+        d |= uint64(indices[bestTable][i * 4 + 3]) << (9  - i * 3);
+    }
+    d |= uint64(bestTable)        << 48;
+    d |= uint64(mod[bestTable])   << 52;
+    d |= uint64(avg)              << 56;
+    d = _bswap64(d);
+
+    return d;
+}
