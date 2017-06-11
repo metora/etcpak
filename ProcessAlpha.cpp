@@ -237,7 +237,7 @@ uint64 ProcessAlpha_ETC2( const uint8* src )
         sum += v;
     }
     uint8 avg = sum / 16;
-    uint8 diff = NiMax(max - avg, avg - min);
+    uint8 diff = std::max(max - avg, avg - min);
 #if __ARM_NEON__
     int16x8_t simdAvg = vdupq_n_s16(avg);
 #endif
